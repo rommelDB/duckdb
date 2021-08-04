@@ -2,6 +2,7 @@
 #ifndef DUCKDB_AMALGAMATION
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/function/table/table_scan.hpp"
@@ -23,6 +24,7 @@
 #include "duckdb/storage/statistics/numeric_statistics.hpp"
 #endif
 
+#include <iostream>
 using namespace duckdb;
 
 // in this example we build a simple volcano model executor on top of the DuckDB logical plans
@@ -94,6 +96,71 @@ void RunExampleDuckDBCatalog() {
 }
 
 //===--------------------------------------------------------------------===//
+// Example Using Custom Function over DuckDB Catalog
+//===--------------------------------------------------------------------===//
+void RunCustomFunctionDuckDB() {
+	// in this example we use the DuckDB CREATE TABLE syntax to create tables to link against
+	// this works and the tables are easy to define, but since the tables are empty there are no statistics available
+	// we can use our own table functions (see RunExampleTableScan), but this is slightly more involved
+
+	DBConfig config;
+	config.initialize_default_database = false;
+
+	// disable the statistics propagator optimizer
+	// this is required since the statistics propagator will truncate our plan
+	// (e.g. it will recognize the table is empty that satisfy the predicate i=3
+	//       and then prune the entire plan)
+	config.disabled_optimizers.insert(OptimizerType::STATISTICS_PROPAGATION);
+	// we don't support filter pushdown yet in our toy example
+	config.disabled_optimizers.insert(OptimizerType::FILTER_PUSHDOWN);
+
+	DuckDB db(nullptr, &config);
+	Connection con(db);
+
+	// we perform an explicit BEGIN TRANSACTION here
+	// since "CreateFunction" will directly poke around in the catalog
+	// which requires an active transaction
+	con.Query("BEGIN TRANSACTION");
+
+	// register dummy tables (for our binding purposes)
+	con.Query("CREATE TABLE mytable(i INTEGER, j INTEGER)");
+	con.Query("CREATE TABLE myothertable(k INTEGER)");
+	// contents of the tables
+	// mytable:
+	// i: 1, 2, 3, 4, 5
+	// j: 2, 3, 4, 5, 6
+	// myothertable
+	// k: 1, 10, 20
+	// (see MyScanNode)
+
+	// register functions and aggregates (for our binding purposes)
+	CreateFunction(con, "+", {LogicalType::INTEGER, LogicalType::INTEGER}, LogicalType::INTEGER);
+	CreateFunction(con, "isnull", {LogicalType::INTEGER, LogicalType::INTEGER}, LogicalType::INTEGER);
+	CreateAggregateFunction(con, "count_star", {}, LogicalType::BIGINT);
+	CreateAggregateFunction(con, "sum", {LogicalType::INTEGER}, LogicalType::INTEGER);
+
+	con.Query("COMMIT");
+
+	// standard projections
+	//ExecuteQuery(con, "SELECT coalesce(i, 0) FROM mytable");//OK
+	//ExecuteQuery(con, "SELECT ifnull(i, 0) FROM mytable");//OK
+	//ExecuteQuery(con, "SELECT isnull(i, 0) FROM mytable");//ERROR
+	/*ExecuteQuery(con, "SELECT * FROM mytable");
+	ExecuteQuery(con, "SELECT i FROM mytable");
+	ExecuteQuery(con, "SELECT j FROM mytable");
+	ExecuteQuery(con, "SELECT k FROM myothertable");*/
+	// some simple filter + projection
+	ExecuteQuery(con, "SELECT i+1 FROM mytable WHERE i=3 OR i=4");
+	// more complex filters
+	/*ExecuteQuery(con, "SELECT i+1 FROM mytable WHERE (i<=2 AND j<=3) OR (i=4 AND j=5)");
+	// aggregate
+	ExecuteQuery(con, "SELECT COUNT(*), SUM(i) + 1, SUM(j) + 2 FROM mytable WHERE i>2");
+	// with a subquery
+	ExecuteQuery(con,
+	             "SELECT a, b + 1, c + 2 FROM (SELECT COUNT(*), SUM(i), SUM(j) FROM mytable WHERE i > 2) tbl(a, b, c)");*/
+}
+
+//===--------------------------------------------------------------------===//
 // Example Using Custom Scan Function
 //===--------------------------------------------------------------------===//
 void CreateMyScanFunction(Connection &con);
@@ -151,8 +218,9 @@ void RunExampleTableScan() {
 }
 
 int main() {
-	RunExampleDuckDBCatalog();
-	RunExampleTableScan();
+	//RunExampleDuckDBCatalog();
+	//RunExampleTableScan();
+	RunCustomFunctionDuckDB();
 }
 
 //===--------------------------------------------------------------------===//
@@ -280,17 +348,58 @@ public:
 	unique_ptr<MyNode> TransformPlan(LogicalOperator &op);
 };
 
+void Imprimir(unique_ptr<LogicalOperator> op){
+	std::cout<<"Name: "<<op->GetName()<<"\n";
+	std::cout<<"Params: "<<op->ParamsToString()<<"\n";
+
+	for(auto& exp : op->expressions){
+		std::cout<<"exp: "<<exp->GetName()<<"\n";
+		std::cout<<"alias: "<<exp->alias<<"\n";
+	}
+	std::cout<<"\n";
+
+	std::string dsl_calcite = "";
+
+	switch (op->type) {
+		case LogicalOperatorType::LOGICAL_PROJECTION:
+			dsl_calcite = "";
+		break;
+		case LogicalOperatorType::LOGICAL_FILTER:
+			auto logOp = unique_ptr<LogicalFilter>{static_cast<LogicalFilter*>(op.release())};
+			if(!logOp) std::cout<<"Error at cast!\n";
+			auto vec = logOp->GetColumnBindings();
+			for(auto col : vec){
+				std::cout<<" - "<<col.table_index<<" - "<<col.column_index<<" ";
+			}
+			std::cout<<"\n";
+			logOp->SplitPredicates();
+			for(auto& exp : logOp->expressions){
+				std::cout<<"exp2: "<<exp->GetName()<<"\n";
+				std::cout<<"alias2: "<<exp->alias<<"\n";
+			}
+			std::cout<<"\n";
+			op = unique_ptr<LogicalOperator>{static_cast<LogicalOperator*>(logOp.release())};
+			dsl_calcite = "";
+		break;
+	}
+
+	for(auto& child : op->children){
+		Imprimir(std::move(child));
+	}
+}
+
 void ExecuteQuery(Connection &con, const string &query) {
 	// create the logical plan
 	auto plan = con.ExtractPlan(query);
 	plan->Print();
 
+	Imprimir(std::move(plan));
 	// transform the logical plan into our own plan
-	MyPlanGenerator generator;
-	auto my_plan = generator.TransformPlan(*plan);
+	//MyPlanGenerator generator;
+	//auto my_plan = generator.TransformPlan(*plan);
 
 	// execute the plan and print the result
-	printf("Executing query: %s\n", query.c_str());
+	/*printf("Executing query: %s\n", query.c_str());
 	printf("----------------------\n");
 	vector<int> result;
 	while (true) {
@@ -307,7 +416,7 @@ void ExecuteQuery(Connection &con, const string &query) {
 		}
 		printf("%s\n", str.c_str());
 	}
-	printf("----------------------\n");
+	printf("----------------------\n");*/
 }
 
 //===--------------------------------------------------------------------===//
