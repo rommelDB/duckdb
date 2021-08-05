@@ -3,6 +3,7 @@
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
+#include "duckdb/planner/operator/logical_order.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/function/table/table_scan.hpp"
@@ -150,7 +151,8 @@ void RunCustomFunctionDuckDB() {
 	ExecuteQuery(con, "SELECT j FROM mytable");
 	ExecuteQuery(con, "SELECT k FROM myothertable");*/
 	// some simple filter + projection
-	ExecuteQuery(con, "SELECT i+1 FROM mytable WHERE i=3 OR i=4");
+	//ExecuteQuery(con, "SELECT i+1 FROM mytable WHERE i=3 OR i=4");
+	ExecuteQuery(con, "SELECT * FROM mytable WHERE i>4 order by i desc, j desc");
 	// more complex filters
 	/*ExecuteQuery(con, "SELECT i+1 FROM mytable WHERE (i<=2 AND j<=3) OR (i=4 AND j=5)");
 	// aggregate
@@ -349,14 +351,15 @@ public:
 };
 
 void Imprimir(unique_ptr<LogicalOperator> op){
-	std::cout<<"Name: "<<op->GetName()<<"\n";
-	std::cout<<"Params: "<<op->ParamsToString()<<"\n";
+	/*std::cout<<"Name: "<<op->GetName()<<"\n";
+	std::cout<<"type: "<<(int)op->type<<"\n";*/
+	/*std::cout<<"Params: "<<op->ParamsToString()<<"\n";
 
 	for(auto& exp : op->expressions){
 		std::cout<<"exp: "<<exp->GetName()<<"\n";
 		std::cout<<"alias: "<<exp->alias<<"\n";
 	}
-	std::cout<<"\n";
+	std::cout<<"\n";*/
 
 	std::string dsl_calcite = "";
 
@@ -365,23 +368,50 @@ void Imprimir(unique_ptr<LogicalOperator> op){
 			dsl_calcite = "";
 		break;
 		case LogicalOperatorType::LOGICAL_FILTER:
+		{
 			auto logOp = unique_ptr<LogicalFilter>{static_cast<LogicalFilter*>(op.release())};
 			if(!logOp) std::cout<<"Error at cast!\n";
-			auto vec = logOp->GetColumnBindings();
+			/*auto vec = logOp->GetColumnBindings();
 			for(auto col : vec){
 				std::cout<<" - "<<col.table_index<<" - "<<col.column_index<<" ";
 			}
-			std::cout<<"\n";
+			std::cout<<"\n";*/
 			logOp->SplitPredicates();
-			for(auto& exp : logOp->expressions){
+			/*for(auto& exp : logOp->expressions){
 				std::cout<<"exp2: "<<exp->GetName()<<"\n";
 				std::cout<<"alias2: "<<exp->alias<<"\n";
-			}
+			}*/
 			std::cout<<"\n";
 			op = unique_ptr<LogicalOperator>{static_cast<LogicalOperator*>(logOp.release())};
-			dsl_calcite = "";
+			dsl_calcite = "LogicalFilter(condition=[" + op->ParamsToString() + "])";
+		}
+		break;
+		case LogicalOperatorType::LOGICAL_GET:
+			dsl_calcite = "LogicalTableScan(table=[[" + op->ParamsToString() + "]])";
+		break;
+		case LogicalOperatorType::LOGICAL_ORDER_BY:
+		{
+			dsl_calcite = "LogicalSort(";
+			auto logOp = unique_ptr<LogicalOrder>{static_cast<LogicalOrder*>(op.release())};
+			if(!logOp) std::cout<<"Error at cast!\n";
+
+			for (idx_t i = 0; i < logOp->orders.size(); i++) {
+				dsl_calcite += "sort" + std::to_string(i) + "=[" + logOp->orders[i].expression->GetName() + "]";
+				dsl_calcite += ", ";
+				std::string order_type = logOp->orders[i].type == OrderType::ASCENDING ? "ASC" : "DESC";
+				dsl_calcite += "dir" + std::to_string(i) + "=[" + order_type + "]";
+
+				if(i<logOp->orders.size()-1)
+					dsl_calcite += ", ";
+			}
+
+			op = unique_ptr<LogicalOperator>{static_cast<LogicalOperator*>(logOp.release())};
+			dsl_calcite += "])";
+		}
 		break;
 	}
+
+	std::cout<<dsl_calcite<<std::endl;
 
 	for(auto& child : op->children){
 		Imprimir(std::move(child));
