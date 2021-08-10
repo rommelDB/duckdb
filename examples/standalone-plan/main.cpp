@@ -5,6 +5,7 @@
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_order.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
+#include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/function/table/table_scan.hpp"
 #include "duckdb/planner/expression.hpp"
@@ -152,7 +153,8 @@ void RunCustomFunctionDuckDB() {
 	ExecuteQuery(con, "SELECT k FROM myothertable");*/
 	// some simple filter + projection
 	//ExecuteQuery(con, "SELECT i+1 FROM mytable WHERE i=3 OR i=4");
-	ExecuteQuery(con, "SELECT * FROM mytable WHERE i>4 order by i desc, j desc");
+	//ExecuteQuery(con, "SELECT * FROM mytable WHERE i>4 order by i desc, j desc");
+	ExecuteQuery(con, "SELECT * FROM mytable t1 join mytable t2 on t1.i=t2.j");
 	// more complex filters
 	/*ExecuteQuery(con, "SELECT i+1 FROM mytable WHERE (i<=2 AND j<=3) OR (i=4 AND j=5)");
 	// aggregate
@@ -407,6 +409,31 @@ void Imprimir(unique_ptr<LogicalOperator> op){
 
 			op = unique_ptr<LogicalOperator>{static_cast<LogicalOperator*>(logOp.release())};
 			dsl_calcite += "])";
+		}
+		case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
+		{
+			auto logOp = unique_ptr<LogicalComparisonJoin>{static_cast<LogicalComparisonJoin*>(op.release())};
+			if(!logOp) std::cout<<"Error at cast!\n";
+
+			dsl_calcite += "LogicalJoin(condition=[";
+
+			for (auto &condition : logOp->conditions) {
+				auto expr = make_unique<BoundComparisonExpression>(condition.comparison, condition.left->Copy(),
+																condition.right->Copy());
+				dsl_calcite += expr->ToString();
+			}
+
+			dsl_calcite += "], joinType=[";
+			switch (logOp->join_type)
+			{
+			case JoinType::INNER:
+				dsl_calcite += "inner";
+				break;
+			default:
+				break;
+			}
+			dsl_calcite += "])";
+			op = unique_ptr<LogicalOperator>{static_cast<LogicalOperator*>(logOp.release())};
 		}
 		break;
 	}
